@@ -7,16 +7,28 @@ import (
 )
 
 // String renders the result the way someone reading a terminal wants it:
-// the notation, the individual rolls, what got dropped (if anything), and
-// the total.
+// the notation, then each term's rolls (or value) in order, what got
+// dropped (if anything), and the total.
 func (r *Result) String() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: %v", r.Expression, r.Rolls)
-	if len(r.Dropped) > 0 {
-		fmt.Fprintf(&b, " (dropped %v)", r.Dropped)
-	}
-	if r.Modifier != 0 {
-		fmt.Fprintf(&b, " %+d", r.Modifier)
+	fmt.Fprintf(&b, "%s: ", r.Expression)
+	for i, t := range r.Terms {
+		switch {
+		case i == 0 && t.Sign < 0:
+			b.WriteString("-")
+		case i > 0 && t.Sign < 0:
+			b.WriteString(" - ")
+		case i > 0:
+			b.WriteString(" + ")
+		}
+		if t.Sides > 0 {
+			fmt.Fprintf(&b, "%v", t.Rolls)
+			if len(t.Dropped) > 0 {
+				fmt.Fprintf(&b, " (dropped %v)", t.Dropped)
+			}
+		} else {
+			fmt.Fprintf(&b, "%d", t.Constant)
+		}
 	}
 	fmt.Fprintf(&b, " = %d", r.Total)
 	return b.String()
