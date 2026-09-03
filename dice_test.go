@@ -154,6 +154,109 @@ func TestRollMultiTerm(t *testing.T) {
 	}
 }
 
+func TestParseExplode(t *testing.T) {
+	expr, err := Parse("3d6!")
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if !expr.Terms[0].Explode {
+		t.Fatalf("expected Explode true, got %+v", expr.Terms[0])
+	}
+}
+
+func TestParseExplodeWithKeep(t *testing.T) {
+	expr, err := Parse("4d6!kh3")
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if !expr.Terms[0].Explode || expr.Terms[0].KeepHighest != 3 {
+		t.Fatalf("unexpected term: %+v", expr.Terms[0])
+	}
+}
+
+func TestParseExplodeRejectsSideOne(t *testing.T) {
+	if _, err := Parse("3d1!"); err == nil {
+		t.Fatal("expected an error exploding a one-sided die")
+	}
+}
+
+func TestRollDiceExplodeChains(t *testing.T) {
+	seq := []int{6, 6, 3}
+	i := 0
+	next := func() int {
+		v := seq[i]
+		i++
+		return v
+	}
+	rolls := rollDice(1, 6, true, next)
+	want := []int{6, 6, 3}
+	if len(rolls) != len(want) {
+		t.Fatalf("rolls = %v, want %v", rolls, want)
+	}
+	for j := range want {
+		if rolls[j] != want[j] {
+			t.Fatalf("rolls = %v, want %v", rolls, want)
+		}
+	}
+}
+
+func TestRollDiceExplodeMultipleDice(t *testing.T) {
+	seq := []int{4, 6, 2}
+	i := 0
+	next := func() int {
+		v := seq[i]
+		i++
+		return v
+	}
+	rolls := rollDice(2, 6, true, next)
+	want := []int{4, 6, 2}
+	if len(rolls) != len(want) {
+		t.Fatalf("rolls = %v, want %v", rolls, want)
+	}
+	for j := range want {
+		if rolls[j] != want[j] {
+			t.Fatalf("rolls = %v, want %v", rolls, want)
+		}
+	}
+}
+
+func TestRollDiceNoExplodeStopsAtCount(t *testing.T) {
+	seq := []int{6, 6}
+	i := 0
+	next := func() int {
+		v := seq[i]
+		i++
+		return v
+	}
+	rolls := rollDice(2, 6, false, next)
+	if len(rolls) != 2 {
+		t.Fatalf("expected 2 rolls with explode disabled, got %v", rolls)
+	}
+}
+
+func TestRollExplodingIntegration(t *testing.T) {
+	expr, err := Parse("5d2!")
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	rng := rand.New(rand.NewSource(1))
+	result, err := expr.Roll(rng)
+	if err != nil {
+		t.Fatalf("Roll returned error: %v", err)
+	}
+	term := result.Terms[0]
+	if len(term.Kept) != len(term.Rolls) || len(term.Dropped) != 0 {
+		t.Fatalf("expected all rolls kept, got %+v", term)
+	}
+	sum := 0
+	for _, v := range term.Rolls {
+		sum += v
+	}
+	if term.Subtotal != sum {
+		t.Fatalf("subtotal = %d, want sum of rolls %d", term.Subtotal, sum)
+	}
+}
+
 func TestFormatJSON(t *testing.T) {
 	expr, err := Parse("1d20")
 	if err != nil {

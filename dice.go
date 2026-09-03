@@ -1,7 +1,9 @@
 // Package dice parses and rolls tabletop dice notation such as "3d6+2" or
 // "4d6kh3" (roll four six-sided dice, keep the highest three). Expressions
 // can chain multiple dice groups and flat modifiers together, as in
-// "2d6+1d4-1".
+// "2d6+1d4-1". Dice groups can also explode, as in "3d6!", meaning any die
+// that rolls its maximum value is rolled again with the extra result added
+// to the pool.
 package dice
 
 import (
@@ -14,9 +16,10 @@ import (
 )
 
 // termDicePattern matches a single dice group with no leading sign: an
-// optional count, "d", sides (or "%"), and an optional keep/drop modifier
-// (kh/kl/dh/dl followed by a count). Examples: "d20", "3d6", "4d6kh3".
-var termDicePattern = regexp.MustCompile(`^(\d*)d(\d+|%)((?:kh|kl|dh|dl)\d+)?$`)
+// optional count, "d", sides (or "%"), an optional explode marker ("!"),
+// and an optional keep/drop modifier (kh/kl/dh/dl followed by a count).
+// Examples: "d20", "3d6", "4d6kh3", "3d6!", "3d6!kh2".
+var termDicePattern = regexp.MustCompile(`^(\d*)d(\d+|%)(!)?((?:kh|kl|dh|dl)\d+)?$`)
 
 // termConstPattern matches a flat numeric term with no leading sign, e.g.
 // the "2" in "3d6+2".
@@ -25,6 +28,12 @@ var termConstPattern = regexp.MustCompile(`^(\d+)$`)
 const (
 	maxDice  = 1000
 	maxSides = 100000
+
+	// maxExplosions caps how many extra dice a single die can chain into.
+	// explode is rejected at parse time for sides < 2, so in practice a
+	// chain this long would take a run of luck astronomically unlikely to
+	// occur; the cap exists only to bound worst-case work.
+	maxExplosions = 100
 )
 
 // Term is one piece of an Expression: either a dice group (Sides > 0) or a
@@ -33,6 +42,7 @@ type Term struct {
 	Sign        int
 	Count       int
 	Sides       int
+	Explode     bool
 	KeepHighest int
 	KeepLowest  int
 	DropHighest int
@@ -49,10 +59,10 @@ type Expression struct {
 
 // Parse turns a notation string into an Expression. The notation is one or
 // more terms joined by "+" or "-". Each term is either a flat integer or a
-// dice group in NdS form, optionally followed by one keep/drop clause (kh,
-// kl, dh, dl, each followed by a count). "d%" is shorthand for a
-// hundred-sided die. At least one term must be a dice group; a bare number
-// like "5" is rejected.
+// dice group in NdS form, optionally followed by an explode marker ("!")
+// and then one keep/drop clause (kh, kl, dh, dl, each followed by a
+// count). "d%" is shorthand for a hundred-sided die. At least one term
+// must be a dice group; a bare number like "5" is rejected.
 func Parse(notation string) (*Expression, error) {
 	if notation == "" {
 		return nil, fmt.Errorf("dice: empty notation")
@@ -150,9 +160,16 @@ func parseTerm(token string) (Term, error) {
 
 	term := Term{Sign: sign, Count: count, Sides: sides}
 
-	if m[3] != "" {
-		kind := m[3][:2]
-		n, err := strconv.Atoi(m[3][2:])
+	if m[3] == "!" {
+		if sides < 2 {
+			return Term{}, fmt.Errorf("sides %d too small to explode in %q", sides, token)
+		}
+		term.Explode = true
+	}
+
+	if m[4] != "" {
+		kind := m[4][:2]
+		n, err := strconv.Atoi(m[4][2:])
 		if err != nil {
 			return Term{}, fmt.Errorf("invalid keep/drop count in %q: %w", token, err)
 		}
@@ -222,12 +239,12 @@ func rollTerm(term Term, rng *rand.Rand) TermResult {
 		return tr
 	}
 
-	rolls := make([]int, term.Count)
-	for i := range rolls {
-		rolls[i] = 1 + rng.Intn(term.Sides)
-	}
+	rolls := rollDice(term.Count, term.Sides, term.Explode, func() int {
+		return 1 + rng.Intn(term.Sides)
+	})
+	n := len(rolls)
 
-	keepCount := term.Count
+	keepCount := n
 	keepHighest := true
 	switch {
 	case term.KeepHighest > 0:
@@ -235,12 +252,12 @@ func rollTerm(term Term, rng *rand.Rand) TermResult {
 	case term.KeepLowest > 0:
 		keepCount, keepHighest = term.KeepLowest, false
 	case term.DropHighest > 0:
-		keepCount, keepHighest = term.Count-term.DropHighest, false
+		keepCount, keepHighest = n-term.DropHighest, false
 	case term.DropLowest > 0:
-		keepCount, keepHighest = term.Count-term.DropLowest, true
+		keepCount, keepHighest = n-term.DropLowest, true
 	}
 
-	idx := make([]int, term.Count)
+	idx := make([]int, n)
 	for i := range idx {
 		idx[i] = i
 	}
@@ -248,7 +265,7 @@ func rollTerm(term Term, rng *rand.Rand) TermResult {
 
 	keepSet := make(map[int]bool, keepCount)
 	if keepHighest {
-		for _, i := range idx[term.Count-keepCount:] {
+		for _, i := range idx[n-keepCount:] {
 			keepSet[i] = true
 		}
 	} else {
@@ -258,7 +275,7 @@ func rollTerm(term Term, rng *rand.Rand) TermResult {
 	}
 
 	kept := make([]int, 0, keepCount)
-	dropped := make([]int, 0, term.Count-keepCount)
+	dropped := make([]int, 0, n-keepCount)
 	sum := 0
 	for i, v := range rolls {
 		if keepSet[i] {
@@ -276,6 +293,22 @@ func rollTerm(term Term, rng *rand.Rand) TermResult {
 	tr.Dropped = dropped
 	tr.Subtotal = term.Sign * sum
 	return tr
+}
+
+// rollDice rolls count dice by calling next once per die. When explode is
+// true, a die that comes up at its maximum value triggers an extra call to
+// next, chained until a non-maximum value appears or maxExplosions is hit.
+func rollDice(count, sides int, explode bool, next func() int) []int {
+	rolls := make([]int, 0, count)
+	for i := 0; i < count; i++ {
+		v := next()
+		rolls = append(rolls, v)
+		for chain := 0; explode && v == sides && chain < maxExplosions; chain++ {
+			v = next()
+			rolls = append(rolls, v)
+		}
+	}
+	return rolls
 }
 
 // Roll parses and rolls a notation string in one step, using a source seeded
