@@ -23,6 +23,9 @@ func (r *Result) String() string {
 		}
 		if t.Sides > 0 {
 			fmt.Fprintf(&b, "%v", t.Rolls)
+			if len(t.Rerolled) > 0 {
+				fmt.Fprintf(&b, " (rerolled %v)", t.Rerolled)
+			}
 			if len(t.Dropped) > 0 {
 				fmt.Fprintf(&b, " (dropped %v)", t.Dropped)
 			}

@@ -188,7 +188,7 @@ func TestRollDiceExplodeChains(t *testing.T) {
 		i++
 		return v
 	}
-	rolls := rollDice(1, 6, true, next)
+	rolls, _ := rollDice(1, 6, true, rerollRule{}, next)
 	want := []int{6, 6, 3}
 	if len(rolls) != len(want) {
 		t.Fatalf("rolls = %v, want %v", rolls, want)
@@ -208,7 +208,7 @@ func TestRollDiceExplodeMultipleDice(t *testing.T) {
 		i++
 		return v
 	}
-	rolls := rollDice(2, 6, true, next)
+	rolls, _ := rollDice(2, 6, true, rerollRule{}, next)
 	want := []int{4, 6, 2}
 	if len(rolls) != len(want) {
 		t.Fatalf("rolls = %v, want %v", rolls, want)
@@ -228,9 +228,110 @@ func TestRollDiceNoExplodeStopsAtCount(t *testing.T) {
 		i++
 		return v
 	}
-	rolls := rollDice(2, 6, false, next)
+	rolls, _ := rollDice(2, 6, false, rerollRule{}, next)
 	if len(rolls) != 2 {
 		t.Fatalf("expected 2 rolls with explode disabled, got %v", rolls)
+	}
+}
+
+func TestRollDiceRerollChains(t *testing.T) {
+	seq := []int{1, 1, 4}
+	i := 0
+	next := func() int {
+		v := seq[i]
+		i++
+		return v
+	}
+	rolls, rerolled := rollDice(1, 6, false, rerollRule{On: 1}, next)
+	if len(rolls) != 1 || rolls[0] != 4 {
+		t.Fatalf("rolls = %v, want [4]", rolls)
+	}
+	if len(rerolled) != 2 || rerolled[0] != 1 || rerolled[1] != 1 {
+		t.Fatalf("rerolled = %v, want [1 1]", rerolled)
+	}
+}
+
+func TestRollDiceRerollOnceStopsAfterOneAttempt(t *testing.T) {
+	seq := []int{1, 1}
+	i := 0
+	next := func() int {
+		v := seq[i]
+		i++
+		return v
+	}
+	rolls, rerolled := rollDice(1, 6, false, rerollRule{On: 1, Once: true}, next)
+	if len(rolls) != 1 || rolls[0] != 1 {
+		t.Fatalf("rolls = %v, want [1]", rolls)
+	}
+	if len(rerolled) != 1 || rerolled[0] != 1 {
+		t.Fatalf("rerolled = %v, want [1]", rerolled)
+	}
+}
+
+func TestParseReroll(t *testing.T) {
+	expr, err := Parse("4d6r1")
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if expr.Terms[0].RerollOn != 1 || expr.Terms[0].RerollOnce {
+		t.Fatalf("unexpected term: %+v", expr.Terms[0])
+	}
+}
+
+func TestParseRerollOnce(t *testing.T) {
+	expr, err := Parse("4d6ro1")
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if expr.Terms[0].RerollOn != 1 || !expr.Terms[0].RerollOnce {
+		t.Fatalf("unexpected term: %+v", expr.Terms[0])
+	}
+}
+
+func TestParseRerollWithKeep(t *testing.T) {
+	expr, err := Parse("4d6ro1kh3")
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if expr.Terms[0].RerollOn != 1 || !expr.Terms[0].RerollOnce || expr.Terms[0].KeepHighest != 3 {
+		t.Fatalf("unexpected term: %+v", expr.Terms[0])
+	}
+}
+
+func TestParseRerollTargetOutOfRange(t *testing.T) {
+	if _, err := Parse("4d6r7"); err == nil {
+		t.Fatal("expected an error for a reroll target above the die's sides")
+	}
+}
+
+func TestParseRerollRejectsSideOne(t *testing.T) {
+	if _, err := Parse("3d1r1"); err == nil {
+		t.Fatal("expected an error rerolling a one-sided die")
+	}
+}
+
+func TestRollRerollIntegration(t *testing.T) {
+	expr, err := Parse("5d2ro1")
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	rng := rand.New(rand.NewSource(1))
+	result, err := expr.Roll(rng)
+	if err != nil {
+		t.Fatalf("Roll returned error: %v", err)
+	}
+	term := result.Terms[0]
+	sum := 0
+	for _, v := range term.Rolls {
+		sum += v
+	}
+	if term.Subtotal != sum {
+		t.Fatalf("subtotal = %d, want sum of rolls %d", term.Subtotal, sum)
+	}
+	for _, v := range term.Rerolled {
+		if v != 1 {
+			t.Fatalf("rerolled = %v, want only 1s", term.Rerolled)
+		}
 	}
 }
 

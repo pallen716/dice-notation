@@ -3,7 +3,9 @@
 // can chain multiple dice groups and flat modifiers together, as in
 // "2d6+1d4-1". Dice groups can also explode, as in "3d6!", meaning any die
 // that rolls its maximum value is rolled again with the extra result added
-// to the pool.
+// to the pool. A group can also reroll a target value: "4d6r1" rerolls any
+// 1 (repeating until the reroll also isn't a 1), and "4d6ro1" rerolls a 1
+// only once, keeping whatever comes up second even if it's another 1.
 package dice
 
 import (
@@ -16,10 +18,11 @@ import (
 )
 
 // termDicePattern matches a single dice group with no leading sign: an
-// optional count, "d", sides (or "%"), an optional explode marker ("!"),
-// and an optional keep/drop modifier (kh/kl/dh/dl followed by a count).
-// Examples: "d20", "3d6", "4d6kh3", "3d6!", "3d6!kh2".
-var termDicePattern = regexp.MustCompile(`^(\d*)d(\d+|%)(!)?((?:kh|kl|dh|dl)\d+)?$`)
+// optional count, "d", sides (or "%"), an optional explode marker ("!"), an
+// optional reroll clause ("r" or "ro" followed by a target value), and an
+// optional keep/drop modifier (kh/kl/dh/dl followed by a count). Examples:
+// "d20", "3d6", "4d6kh3", "3d6!", "3d6!kh2", "4d6r1", "4d6ro1kh3".
+var termDicePattern = regexp.MustCompile(`^(\d*)d(\d+|%)(!)?(?:r(o)?(\d+))?((?:kh|kl|dh|dl)\d+)?$`)
 
 // termConstPattern matches a flat numeric term with no leading sign, e.g.
 // the "2" in "3d6+2".
@@ -34,6 +37,12 @@ const (
 	// chain this long would take a run of luck astronomically unlikely to
 	// occur; the cap exists only to bound worst-case work.
 	maxExplosions = 100
+
+	// maxRerolls caps how many times a single die can be rerolled under
+	// "r" (unbounded, non-"o") notation. Rejected at parse time for
+	// sides < 2, so as with maxExplosions the cap only bounds worst-case
+	// work rather than reflecting a realistic chain length.
+	maxRerolls = 100
 )
 
 // Term is one piece of an Expression: either a dice group (Sides > 0) or a
@@ -43,6 +52,8 @@ type Term struct {
 	Count       int
 	Sides       int
 	Explode     bool
+	RerollOn    int
+	RerollOnce  bool
 	KeepHighest int
 	KeepLowest  int
 	DropHighest int
@@ -59,10 +70,11 @@ type Expression struct {
 
 // Parse turns a notation string into an Expression. The notation is one or
 // more terms joined by "+" or "-". Each term is either a flat integer or a
-// dice group in NdS form, optionally followed by an explode marker ("!")
-// and then one keep/drop clause (kh, kl, dh, dl, each followed by a
-// count). "d%" is shorthand for a hundred-sided die. At least one term
-// must be a dice group; a bare number like "5" is rejected.
+// dice group in NdS form, optionally followed by an explode marker ("!"),
+// then a reroll clause (r or ro followed by a target value), and then one
+// keep/drop clause (kh, kl, dh, dl, each followed by a count). "d%" is
+// shorthand for a hundred-sided die. At least one term must be a dice
+// group; a bare number like "5" is rejected.
 func Parse(notation string) (*Expression, error) {
 	if notation == "" {
 		return nil, fmt.Errorf("dice: empty notation")
@@ -167,9 +179,24 @@ func parseTerm(token string) (Term, error) {
 		term.Explode = true
 	}
 
-	if m[4] != "" {
-		kind := m[4][:2]
-		n, err := strconv.Atoi(m[4][2:])
+	if m[5] != "" {
+		if sides < 2 {
+			return Term{}, fmt.Errorf("sides %d too small to reroll in %q", sides, token)
+		}
+		n, err := strconv.Atoi(m[5])
+		if err != nil {
+			return Term{}, fmt.Errorf("invalid reroll target in %q: %w", token, err)
+		}
+		if n < 1 || n > sides {
+			return Term{}, fmt.Errorf("reroll target %d out of range (1-%d) in %q", n, sides, token)
+		}
+		term.RerollOn = n
+		term.RerollOnce = m[4] == "o"
+	}
+
+	if m[6] != "" {
+		kind := m[6][:2]
+		n, err := strconv.Atoi(m[6][2:])
 		if err != nil {
 			return Term{}, fmt.Errorf("invalid keep/drop count in %q: %w", token, err)
 		}
@@ -197,6 +224,7 @@ type TermResult struct {
 	Count    int   `json:"count,omitempty"`
 	Sides    int   `json:"sides,omitempty"`
 	Rolls    []int `json:"rolls,omitempty"`
+	Rerolled []int `json:"rerolled,omitempty"`
 	Kept     []int `json:"kept,omitempty"`
 	Dropped  []int `json:"dropped,omitempty"`
 	Constant int   `json:"constant,omitempty"`
@@ -239,7 +267,8 @@ func rollTerm(term Term, rng *rand.Rand) TermResult {
 		return tr
 	}
 
-	rolls := rollDice(term.Count, term.Sides, term.Explode, func() int {
+	reroll := rerollRule{On: term.RerollOn, Once: term.RerollOnce}
+	rolls, rerolled := rollDice(term.Count, term.Sides, term.Explode, reroll, func() int {
 		return 1 + rng.Intn(term.Sides)
 	})
 	n := len(rolls)
@@ -289,26 +318,48 @@ func rollTerm(term Term, rng *rand.Rand) TermResult {
 	tr.Count = term.Count
 	tr.Sides = term.Sides
 	tr.Rolls = rolls
+	tr.Rerolled = rerolled
 	tr.Kept = kept
 	tr.Dropped = dropped
 	tr.Subtotal = term.Sign * sum
 	return tr
 }
 
-// rollDice rolls count dice by calling next once per die. When explode is
-// true, a die that comes up at its maximum value triggers an extra call to
-// next, chained until a non-maximum value appears or maxExplosions is hit.
-func rollDice(count, sides int, explode bool, next func() int) []int {
-	rolls := make([]int, 0, count)
+// rerollRule describes how a die should be rerolled before it's added to
+// the pool. On is the target value that triggers a reroll (0 disables
+// rerolling); Once limits the die to a single reroll attempt, keeping
+// whatever comes up second even if it also matches On.
+type rerollRule struct {
+	On   int
+	Once bool
+}
+
+// rollDice rolls count dice by calling next once per die. Each die is
+// first rerolled against reroll (if enabled): a result matching reroll.On
+// is discarded and replaced by another call to next, repeating until a
+// non-matching value appears (or, with reroll.Once, after a single
+// attempt), capped at maxRerolls. Discarded values are returned separately
+// from the kept rolls. Once a die's final value is settled, explode (if
+// true) chains extra calls to next for as long as the result keeps coming
+// up at the maximum value, capped at maxExplosions.
+func rollDice(count, sides int, explode bool, reroll rerollRule, next func() int) (rolls, rerolled []int) {
+	rolls = make([]int, 0, count)
 	for i := 0; i < count; i++ {
 		v := next()
+		for chain := 0; reroll.On > 0 && v == reroll.On && chain < maxRerolls; chain++ {
+			rerolled = append(rerolled, v)
+			v = next()
+			if reroll.Once {
+				break
+			}
+		}
 		rolls = append(rolls, v)
 		for chain := 0; explode && v == sides && chain < maxExplosions; chain++ {
 			v = next()
 			rolls = append(rolls, v)
 		}
 	}
-	return rolls
+	return rolls, rerolled
 }
 
 // Roll parses and rolls a notation string in one step, using a source seeded
