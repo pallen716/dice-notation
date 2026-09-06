@@ -239,10 +239,19 @@ type Result struct {
 	Total      int          `json:"total"`
 }
 
+// Roller is the source of randomness Expression.Roll draws from. *rand.Rand
+// satisfies it as-is, so the common case needs no wrapping. Callers that
+// want a cryptographically secure source, a fixed sequence for tests, or a
+// house-ruled generator (e.g. one that never rolls the same value twice in a
+// row) can supply their own implementation instead.
+type Roller interface {
+	Intn(n int) int
+}
+
 // Roll rolls the expression using the supplied random source. Taking the
 // source as a parameter, rather than reaching for a package global, is what
 // makes results reproducible in tests.
-func (e *Expression) Roll(rng *rand.Rand) (*Result, error) {
+func (e *Expression) Roll(rng Roller) (*Result, error) {
 	result := &Result{Expression: e.Raw, Terms: make([]TermResult, len(e.Terms))}
 
 	total := 0
@@ -258,7 +267,7 @@ func (e *Expression) Roll(rng *rand.Rand) (*Result, error) {
 
 // rollTerm rolls a single dice term, or evaluates a constant term, and
 // applies its sign to produce a subtotal.
-func rollTerm(term Term, rng *rand.Rand) TermResult {
+func rollTerm(term Term, rng Roller) TermResult {
 	tr := TermResult{Sign: term.Sign}
 
 	if term.Sides == 0 {

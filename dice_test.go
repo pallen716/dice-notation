@@ -358,6 +358,47 @@ func TestRollExplodingIntegration(t *testing.T) {
 	}
 }
 
+// fixedRoller is a Roller that always returns a set sequence of values,
+// wrapping back to the start if it runs out. It exists to prove Expression.Roll
+// works against any Roller implementation, not just *rand.Rand.
+type fixedRoller struct {
+	values []int
+	pos    int
+}
+
+func (f *fixedRoller) Intn(n int) int {
+	v := f.values[f.pos%len(f.values)]
+	f.pos++
+	if v >= n {
+		v = n - 1
+	}
+	return v
+}
+
+func TestRollWithCustomRoller(t *testing.T) {
+	expr, err := Parse("3d6")
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	roller := &fixedRoller{values: []int{5, 2, 3}}
+	result, err := expr.Roll(roller)
+	if err != nil {
+		t.Fatalf("Roll returned error: %v", err)
+	}
+	want := []int{6, 3, 4}
+	if len(result.Terms[0].Rolls) != len(want) {
+		t.Fatalf("rolls = %v, want %v", result.Terms[0].Rolls, want)
+	}
+	for i, v := range want {
+		if result.Terms[0].Rolls[i] != v {
+			t.Fatalf("rolls = %v, want %v", result.Terms[0].Rolls, want)
+		}
+	}
+	if result.Total != 6+3+4 {
+		t.Fatalf("total = %d, want %d", result.Total, 6+3+4)
+	}
+}
+
 func TestFormatJSON(t *testing.T) {
 	expr, err := Parse("1d20")
 	if err != nil {

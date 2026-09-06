@@ -64,6 +64,11 @@ rng := rand.New(rand.NewSource(42))
 result, err := expr.Roll(rng)
 ```
 
+`Expression.Roll` takes a `Roller` — anything with an `Intn(n int) int`
+method — rather than a concrete `*rand.Rand`, so `crypto/rand`-backed
+generators, fixed sequences in tests, or a house-ruled generator all work
+without wrapping.
+
 ## Notation supported so far
 
 - `NdS` — roll N dice with S sides (`N` defaults to 1: `d20` == `1d20`)
